@@ -1,0 +1,6 @@
+saves
+data
+__pycache__
+checkpoints
+out
+*.glb
