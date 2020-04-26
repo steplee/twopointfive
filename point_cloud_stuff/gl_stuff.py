@@ -10,6 +10,10 @@ I just copied this from another project of mine.
 There's a ton of stuff I'm not going to use, but idm
 '''
 
+def homogeneousize(a):
+    if a.ndim == 1: return np.array( (*a,1) , dtype=a.dtype )
+    return np.stack( (a,np.ones((a.shape[0],1),dtype=a.dtype)) )
+
 def make_4x4f(a):
     if a.shape != (4,4):
         b = np.eye(4, dtype=np.float32)
@@ -303,6 +307,66 @@ class Camera:
         else:
             self.view = viewAndProjection[0]
             self.proj = viewAndProjection[1]
+            eye = np.linalg.inv(self.view)[:3,3]
+
+        self.t = eye
+        self.R = self.view[:3,:3]
+
+    def update_arcball(self, anchor, d):
+        if np.linalg.norm(d) < .0001: return
+
+        tt = self.t
+        rr0 = self.R
+        rr = rr0
+
+        dr = np.copy(d) / 500
+        dr[2] = 0
+        dr[[0,1]] = dr[[1,0]]
+        inc_ = cv2.Rodrigues(rr @ dr )[0]
+        inc = np.eye(4)
+        inc[:3,:3] = inc_
+        print('inc',inc)
+
+        P = np.eye(4); P[:3,:3] = rr; P[:3,3] = tt
+        P[:3,3] -= anchor
+        P[:3,3] *= (1+d[2]/500)
+        P = np.linalg.inv(P)
+        P = P @ inc
+        P = np.linalg.inv(P)
+        P[:3,3] += anchor
+        self.R = P[:3,:3]
+        self.t = P[:3,3]
+        P = np.linalg.inv(P)
+        self.view = P
+
+
+        '''
+        dr = np.copy(d)
+        dr[2] *= 0
+        dr[[0,1]] = dr[[1,0]]
+        dr[1] *= -1
+        dr = rr.T @ dr / 500
+        inc =cv2.Rodrigues(rr @ dr )[0]
+        rr = inc @ rr
+
+        #tt += rr @ d
+        scroll_dir = anchor - tt
+        scroll_dir = scroll_dir / (np.linalg.norm(scroll_dir)+1e-6)
+        print(scroll_dir)
+        #tt += scroll_dir * d[2]
+
+        #tt = tt*.4 + inc@tt*.6
+        tt = tt - anchor + inc @ (anchor - tt)
+        print('self.t',self.t)
+        print('tt',tt)
+        self.view = np.eye(4)
+        self.view[:3,:3] = rr.T
+        self.view[:3,3] = -rr.T@tt
+        self.R = rr
+        self.t = tt
+        '''
+
+        pass
 
 
 class SingletonApp:
@@ -320,6 +384,7 @@ class SingletonApp:
         self.right_dx, self.right_dy = 0,0
         self.scroll_dx, self.scroll_dy = 0,0
         self.name = name
+        self.pickedPointClipSpace = None
 
     def do_init(self):
         raise NotImplementedError('must implement')
@@ -335,8 +400,11 @@ class SingletonApp:
 
     def mouse(self, but, st, x,y):
         if but == GLUT_LEFT_BUTTON and (st == GLUT_DOWN):
+            if not self.left_down: self.pick(x,y)
             self.last_x, self.last_y = x, y
             self.left_down = True
+        else:
+            self.pickedPointClipSpace = None
         if but == GLUT_LEFT_BUTTON and (st == GLUT_UP):
             self.left_down = False
         if but == GLUT_RIGHT_BUTTON and (st == GLUT_DOWN):
@@ -346,10 +414,8 @@ class SingletonApp:
             self.right_down = False
         if but == 3 and (st == GLUT_DOWN):
             self.scroll_dy = self.scroll_dy * .7 + .9 * (-1) * 1e-1
-            print('BUTTON',self.scroll_dy)
         if but == 4 and (st == GLUT_DOWN):
             self.scroll_dy = self.scroll_dy * .7 + .9 * (1) * 1e-1
-            print('BUTTON',self.scroll_dy)
     def motion(self, x, y):
         if self.left_down:
             self.left_dx = self.left_dx * .5 + .5 * (x-self.last_x) * 1e-1
@@ -372,7 +438,6 @@ class SingletonApp:
         SingletonApp._instance.idle(*args)
     def _keyboard(*args): SingletonApp._instance.keyboard(*args)
     def _mouse(*args):
-        print('mouse')
         SingletonApp._instance.mouse(*args)
     def _motion(*args): SingletonApp._instance.motion(*args)
     def _reshape(*args): SingletonApp._instance.reshape(*args)
@@ -403,3 +468,11 @@ class SingletonApp:
 
     def run_glut_loop(self):
         glutMainLoop()
+
+    def pick(self, x,y):
+        y = self.wh[1] - y - 1
+        z = float(glReadPixels(x,y, 1,1, GL_DEPTH_COMPONENT, GL_FLOAT).squeeze())
+        x = 2 * x / self.wh[0] - 1
+        #y = -(2 * y / self.wh[1] - 1)
+        y = (2 * y / self.wh[1] - 1)
+        self.pickedPointClipSpace = np.array((x,y,1)) * z
