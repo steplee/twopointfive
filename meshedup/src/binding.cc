@@ -10,13 +10,14 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::class_<Octree>(m, "Octree")
-    .def(py::init<const Vector3&, const Vector3i&, scalar, int, int>())
+    .def(py::init<const Vector3&, const Vector4i&, scalar, int, int>())
     .def_readwrite("offset", &Octree::offset)
     .def("child", &Octree::child)
     .def("render", &Octree::render)
     .def("info", &Octree::info)
     .def("add", &Octree::add)
-    .def("searchNode", &Octree::searchNode)
+    .def("print", &Octree::print)
+    //.def("searchNode", &Octree::searchNode)
     .def("search", &Octree::search);
 
   py::class_<DistIndexPairs>(m, "DistIndexPairs")
@@ -27,5 +28,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         })
     ;
 
+  py::class_<IndexedMesh>(m, "IndexedMesh")
+    .def_readwrite("verts", &IndexedMesh::verts)
+    .def_readwrite("inds", &IndexedMesh::inds)
+    .def("print", &IndexedMesh::print)
+    .def("render", &IndexedMesh::render);
+
   m.def("meshOctree", &meshOctree);
+  m.def("meshOctreeSurfaceNet", &meshOctreeSurfaceNet);
 }

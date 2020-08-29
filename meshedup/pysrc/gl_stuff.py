@@ -30,8 +30,8 @@ class SingletonApp:
     def idle(self, rs):
         self.render(rs)
 
-    def keyboard(self, *args):
-        sys.exit()
+    def keyboard(self, k, *args):
+        if k == b'q': sys.exit()
 
     def mouse(self, but, st, x,y):
         if but == GLUT_LEFT_BUTTON and (st == GLUT_DOWN):
@@ -80,7 +80,7 @@ class SingletonApp:
     def init(self, init_glut=False):
         if init_glut:
             glutInit(sys.argv)
-            glutInitDisplayMode(GLUT_RGB)
+            glutInitDisplayMode(GLUT_RGB | GLUT_DOUBLE)
 
         glutInitWindowSize(*self.wh)
         self.reshape(*self.wh)

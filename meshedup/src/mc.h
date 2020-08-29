@@ -5,7 +5,7 @@
 
 using scalar = float;
 using Vector3 = Eigen::Matrix<scalar,3,1>;
-using Vector3i = Eigen::Matrix<int32_t,3,1>;
+using Vector4i = Eigen::Matrix<int32_t,4,1>;
 using Vector4 = Eigen::Matrix<scalar,4,1>;
 using RowMatrix = Eigen::Matrix<scalar,-1,-1, Eigen::RowMajor>;
 using RowMatrixRef = Eigen::Ref<Eigen::Matrix<scalar,-1,-1, Eigen::RowMajor>>;
@@ -30,15 +30,19 @@ int Polygonise(Gridcell grid, scalar isolevel, Triangle *triangles);
 struct Octree {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-  Octree(const Vector3& offset, const Vector3i& loc, scalar size, int depth, int maxDepth);
+  Octree(const Vector3& offset, const Vector4i& loc, scalar size, int depth, int maxDepth);
   Octree(const Octree& o);
   ~Octree();
 
   //Vector4 cells[8];
-  int cellIds[8];
-  float cellVals[8];
+  //int cellIds[8];
+  //float cellVals[8];
+  int cellId;
+  float cellVal;
+  Vector3 cellPt;
   Octree* children[8] = {nullptr};
 
+  Vector4i loc;
   Vector3 offset;
   scalar size;
   int depth, maxDepth;
@@ -53,13 +57,28 @@ struct Octree {
 
   void render(int toDepth);
   void render_(int toDepth);
+  void print(int depth);
 
   DistIndexPairs search(RowMatrixRef allPts, const RowMatrixRef qpts, int k);
-  Octree searchNode(const Vector3& pt);
+  Octree* searchNode(const Vector3& pt);
+  Octree* searchNode(const Vector4i& loc);
 
   // False if copied for a python binding (e.g. from searchNode)
   bool mustFree = true;
 
 };
 
+struct IndexedMesh {
+  std::vector<Eigen::Vector3f> verts;
+  std::vector<Eigen::Vector3f> normals;
+  std::vector<Eigen::Vector3f> uvs;
+  std::vector<uint32_t> inds;
+
+  uint32_t tex = 0;
+
+  void render();
+  void print();
+};
+
 std::vector<Triangle> meshOctree(Octree& oct, scalar isolevel);
+IndexedMesh meshOctreeSurfaceNet(Octree& oct, scalar isolevel);

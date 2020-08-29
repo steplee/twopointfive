@@ -405,7 +405,7 @@ int Polygonise(Gridcell grid, scalar isolevel, Triangle *triangles)
 
 
 
-Octree::Octree(const Vector3& offset, const Vector3i& loc, scalar size, int depth, int maxDepth)
+Octree::Octree(const Vector3& offset, const Vector4i& loc, scalar size, int depth, int maxDepth)
   : offset(offset), size(size), depth(depth), maxDepth(maxDepth), loc(loc)
 {
   cellId = -1;
@@ -423,7 +423,7 @@ Octree::Octree(const Octree& o) {
 }
 
 Octree::~Octree() {
-  std::cout << " - destructor -- must free: " << mustFree << "\n";
+  //std::cout << " - destructor -- must free: " << mustFree << "\n";
   if (mustFree) {
     for (int i=0; i<8; i++) {
       if (children[i]) {
@@ -435,30 +435,49 @@ Octree::~Octree() {
 }
 
 void Octree::add(const Vector3& pt, int id, scalar val) {
-  uint8_t l = 0;
-  if (pt(0) > offset(0)+size/2.) l |= 1;
-  if (pt(1) > offset(1)+size/2.) l |= 2;
-  if (pt(2) > offset(2)+size/2.) l |= 4;
-
-  if (pt(0) > offset(0)+size) return;
-  if (pt(1) > offset(1)+size) return;
-  if (pt(2) > offset(2)+size) return;
-
+  // If cellId is -2, that means we cannot the node has children and we cannot just store a record in the node.
+  // If cellId is -1, the node has never been touched and is allowed to store the record in itself.
+  // If we add() to a node with >=0 cellId, we must create children, add new record, set cellId=-2, then add old stored record.
+  //if (cellId == -1) {
   if (depth == maxDepth) {
-    cellId = id;
-    cellVal = val;
-    return;
+    cellPt = pt; cellId = id; cellVal = val;
+  } else {
+    uint8_t l = 0;
+    if (pt(0) > offset(0)+size/2.) l |= 1;
+    if (pt(1) > offset(1)+size/2.) l |= 2;
+    if (pt(2) > offset(2)+size/2.) l |= 4;
+
+    if (pt(0) > offset(0)+size) return;
+    if (pt(1) > offset(1)+size) return;
+    if (pt(2) > offset(2)+size) return;
+
+    if (depth == maxDepth) {
+      cellPt = pt;
+      cellId = id;
+      cellVal = val;
+      return;
+    }
+
+    if (children[l] == nullptr) {
+      Vector3 new_off = Vector3::Zero();
+      Vector4i newloc { loc(0)*2, loc(1)*2, loc(2)*2, loc(3)+1 };
+      if (l & 1) { new_off(0) += size/2.0; newloc(0) += 1; }
+      if (l & 2) { new_off(1) += size/2.0; newloc(1) += 1; }
+      if (l & 4) { new_off(2) += size/2.0; newloc(2) += 1; }
+      children[l] = new Octree(offset + new_off, newloc, size/2.0, depth+1, maxDepth);
+    }
+    children[l]->add(pt, id, val);
+
+    // If cellId != -2, we must split, than insert old point.
+    if (cellId != -2) {
+      Vector3 pt__ = cellPt;
+      int id__ = cellId;
+      scalar val__ = cellVal;
+      cellPt.setZero(); cellId = -2; cellVal = 0;
+      this->add(pt__, id__, val__);
+    }
   }
 
-  if (children[l] == nullptr) {
-    Vector3 new_off = Vector3::Zero();
-    Vector3i newloc = loc;
-    if (l & 1) { new_off(0) += size/2.0; newloc(0) += 1; }
-    if (l & 2) { new_off(1) += size/2.0; newloc(1) += 1; }
-    if (l & 4) { new_off(2) += size/2.0; newloc(2) += 1; }
-    children[l] = new Octree(offset + new_off, newloc, size/2.0, depth+1, maxDepth);
-  }
-  children[l]->add(pt, id, val);
 }
 
 Gridcell Octree::gridcell() {
@@ -510,12 +529,16 @@ std::string Octree::info() {
     + std::to_string(offset(2))
     + ", depth=" + std::to_string(depth) + ")"
     + " with " + std::to_string(nc) + " children";
-  std::cout << "    - cell vals: ";
-  for (int i=0; i<8; i++) std::cout << cellVals[i] << " ";
-  std::cout << "\n    - cell ids: ";
-  for (int i=0; i<8; i++) std::cout << cellIds[i] << " ";
-  std ::cout <<"\n";
+  std::cout << "    - cell id/val: " << cellId << " " << cellVal << "\n";
   return out;
+}
+
+void Octree::print(int depth) {
+  for (int i=0; i<depth; i++) std::cout << "  ";
+  std::cout << " node (" << loc.transpose() << ") with id " << cellId << " val " << cellVal << "\n";
+  for (int i=0; i<8; i++) {
+    if (children[i]) children[i]->print(depth+1);
+  }
 }
 
 
@@ -560,13 +583,10 @@ DistIndexPairs Octree::search(const RowMatrixRef allPts, const RowMatrixRef qpts
           while (not st.empty()) {
             auto node = st.top(); st.pop();
             if (node->depth == node->maxDepth) {
-              for (int j=0; j<8; j++) {
-                if (node->cellIds[j] != -1) {
-                  //out.push_back(node->cells[j]);
-                  Vector3 cell_pt = allPts.row(node->cellIds[j]);
-                  pool.push_back( DistIndexScalar{(cell_pt-pt).squaredNorm(), node->cellIds[j]} );
-                  didAdd = true;
-                }
+              if (node->cellId != -1) {
+                Vector3 cell_pt = allPts.row(node->cellId);
+                pool.push_back( DistIndexScalar{(cell_pt-pt).squaredNorm(), node->cellId} );
+                didAdd = true;
               }
             } else for (int j=0; j<8; j++) if (node->children[j]) st.push(node->children[j]);
           }
@@ -608,45 +628,190 @@ std::vector<Triangle> meshOctree(Octree& oct, scalar isolevel) {
 
   // Traverse octree, for now data is only stored at maxDepth, so visit them and get tris.
   std::stack<Octree*> st;
-  std::stack<Octree*> path;
+  std::vector<Octree*> path;
   st.push(&oct);
 
   int nleaves_ = 0, ntris_ = 0;
+  int nbad=0, ngood=0;
 
   while (not st.empty()) {
     Octree* node = st.top();
     st.pop();
 
     if (node->depth == node->maxDepth) {
-      Octree* par = path.top();
       Triangle tmpTris[5];
 
+      //if (node->loc(2) % 2 == 1) continue;
+      //if (node->loc(0) % 2 == 1) continue;
+      //if (node->loc(1) % 2 == 1) continue;
+
       //Gridcell gc = node->gridcell();
+      Gridcell gc;
+      //gc.p[0] = node->offset.array() + ((float)node->size/2.);
+      //gc.p[0] = node->offset;
+      //gc.val[0] = node->cellVal;
+      bool bad = false;
       for (int i=0; i<2; i++)
       for (int j=0; j<2; j++)
       for (int k=0; k<2; k++) {
-        if (i == j and j == k) continue;
-        Gridcell gc;
+        //if (i == 0 and j == 0 and k == 0) continue;
+        //Vector4i the_loc = node->loc - Vector4i{i,j,k,0};
+        //if (the_loc(0)<0 or the_loc(1)<0 or the_loc(2)<0) { bad = true; continue; }
+        //if (i == 0 and j == 0 and k == 0) continue;
+        Vector4i the_loc = node->loc + Vector4i{i,j,k,0};
 
-        int ntris = Polygonise(gc, isolevel, tmpTris);
-        ntris_ += ntris;
-        nleaves_ += 1;
-        for (int i=0; i<ntris; i++) {
-          out.push_back(tmpTris[i]);
+        int lll = 0;
+        if (i==0 and j==0) lll = 0;
+        if (i==1 and j==0) lll = 1;
+        if (i==1 and j==1) lll = 2;
+        if (i==0 and j==1) lll = 3;
+        int ll = (k<<2) + lll;
+
+        Octree* sib = oct.searchNode(the_loc);
+        if (sib->loc == the_loc) {
+          gc.val[ll] = sib->cellVal;
+          gc.p[ll] = sib->offset.array() + node->size/2.;
+        } else {
+          gc.val[ll] = 0;
+          gc.p[ll] = node->offset + Vector3 { i*node->size , j*node->size , k*node->size };
         }
       }
 
+
+      if (not bad) {
+        int ntris = Polygonise(gc, isolevel, tmpTris);
+        ntris_ += ntris;
+        nleaves_ += 1;
+        ngood++;
+        for (int i=0; i<ntris; i++) {
+          out.push_back(tmpTris[i]);
+        }
+      } else {
+        nbad++;
+        //std::cout << " bad at " << node->loc.transpose() << "\n";
+      }
+
     } else {
-      path.push(node);
+      path.push_back(node);
       for (int i=0; i<8; i++) if (node->children[i]) st.push(node->children[i]);
-      path.pop();
+      path.pop_back();
     }
   }
 
-  std::cout << " - " << ntris_ << " tris from " << nleaves_ << " leaves.\n";
+  std::cout << " - " << ntris_ << " tris from " << nleaves_ << " leaves (nbad/ntotal " << nbad << "/" << (ngood+nbad) << ")\n";
 
   return out;
 }
+
+
+IndexedMesh meshOctreeSurfaceNet(Octree& oct, scalar iso) {
+  IndexedMesh out;
+
+  // Traverse octree, for now data is only stored at maxDepth, so visit them and get tris.
+  std::stack<Octree*> st;
+  std::vector<Octree*> path;
+  st.push(&oct);
+
+  int nleaves_ = 0, ntris_ = 0;
+  int nbad=0, ngood=0;
+
+
+  while (not st.empty()) {
+    Octree* node = st.top();
+    st.pop();
+
+    if (node->depth == node->maxDepth) {
+      Triangle tmpTris[5];
+      Gridcell gc;
+      bool bad = false;
+      for (int i=0; i<2; i++)
+      for (int j=0; j<2; j++)
+      for (int k=0; k<2; k++) {
+        Vector4i the_loc = node->loc + Vector4i{i,j,k,0};
+
+        Octree* sib = oct.searchNode(the_loc);
+        if (sib->loc == the_loc) {
+          int ll = (k<<2) + (j<<1) + i;
+          gc.val[ll] = sib->cellVal;
+          gc.p[ll] = sib->offset;
+        } else bad = true;
+      }
+
+      if (not bad) {
+
+        int edges[12][2] = {
+          { 0b001 , 0b000 },
+          { 0b010 , 0b000 },
+          { 0b011 , 0b001 },
+          { 0b011 , 0b010 },
+          { 0b100 , 0b000 },
+          { 0b101 , 0b001 },
+          { 0b101 , 0b100 },
+          { 0b110 , 0b010 },
+          { 0b110 , 0b100 },
+          { 0b111 , 0b011 },
+          { 0b111 , 0b101 },
+          { 0b111 , 0b110 },
+        };
+
+        int e_count = 0;
+        Vector3 vert = Vector3::Zero();
+
+        // For every edge of cube
+        for (int ii=0; ii<12; ii++) {
+          int u = edges[ii][0], v = edges[ii][1];
+          float pu = gc.val[u], pv = gc.val[v];
+          bool signu = pu>iso, signv = pv > iso;
+          if (signu != signv) {
+            e_count++;
+            float t = pu / (pu-pv);
+            for (int j=0; j<3; j++) {
+              int a = u & (1<<j), b = v & (1<<j);
+              if (a != b) vert(j) += a ? 1. - t : t;
+              else        vert(j) += a ? 1. : 0.;
+            }
+          }
+        }
+
+        vert = node->offset + vert * (node->size / e_count);
+
+        out.verts.push_back(vert);
+        // TODO record index.
+
+        for (int i=0; i<3; i++) {
+
+        }
+
+      } else {
+        nbad++;
+      }
+
+    } else {
+      path.push_back(node);
+      for (int i=0; i<8; i++) if (node->children[i]) st.push(node->children[i]);
+      path.pop_back();
+    }
+  }
+
+  std::cout << " - " << ntris_ << " tris from " << nleaves_ << " leaves (nbad/ntotal " << nbad << "/" << (ngood+nbad) << ")\n";
+
+  return out;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include <GL/glew.h>
 void Octree::render(int toDepth) {
@@ -661,7 +826,7 @@ void Octree::render_(int toDepth) {
   if (toDepth == 0) return;
 
   float alpha = ((float)depth+1)/((float)maxDepth+4);
-  alpha = depth < maxDepth ? 0 : alpha;
+  //alpha = depth < maxDepth ? 0 : alpha;
   glColor4f(0,0,1,alpha);
 
   auto gc = gridcell();
@@ -685,8 +850,8 @@ Octree Octree::child(int i) {
   node.mustFree = false;
   return node;
 }
-Octree Octree::searchNode(const Vector3& pt) {
-  const Octree* cur = this;
+Octree* Octree::searchNode(const Vector3& pt) {
+  Octree* cur = this;
 
   while (cur and cur->depth != cur->maxDepth) {
     int l = 0;
@@ -695,8 +860,56 @@ Octree Octree::searchNode(const Vector3& pt) {
     if (pt(2) > cur->offset(2)+cur->size/2.) l |= 4;
     cur = cur->children[l];
   }
+  return cur;
+}
 
-  Octree node (*cur);
-  node.mustFree = false;
-  return node;
+Octree* Octree::searchNode(const Vector4i& loc_) {
+  Octree* cur = this;
+  int qx=loc_(0), qy=loc_(1), qz=loc_(2), qd=loc_(3);
+
+  //std::cout << " searching for " << loc_.transpose() << "\n";
+
+  while (true) {
+    int l = 0;
+    int x=cur->loc(0), y=cur->loc(1), z=cur->loc(2), dd=cur->loc(3);
+
+    int d = qd - dd - 1;
+
+    if (qx & (1<<d)) l |= 1;
+    if (qy & (1<<d)) l |= 2;
+    if (qz & (1<<d)) l |= 4;
+
+    //std::cout << "   at " << cur->loc.transpose() << " going " << ((l)&1) << " " << ((l>>1)&1) << " " << ((l>>2)&1) << " : " << l << "\n";
+
+    if (cur->children[l])
+      cur = cur->children[l];
+    else {
+      //std::cout << "   end at " << cur->loc.transpose() << "\n";
+      return cur;
+    }
+  }
+}
+
+void IndexedMesh::print() {
+  std::cout << " - Mesh (" << verts.size() << " verts) (" << inds.size() << " inds)" << "\n";
+}
+void IndexedMesh::render() {
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glVertexPointer(3, GL_FLOAT, 0, &verts[0]);
+  if (normals.size()) {
+    assert(normals.size() == verts.size());
+    glEnableClientState(GL_NORMAL_ARRAY);
+    glNormalPointer(GL_FLOAT, 0, &normals[0]);
+  }
+  if (uvs.size()) {
+    assert(uvs.size() == verts.size());
+    glClientActiveTexture(GL_TEXTURE0);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glTexCoordPointer(2, GL_FLOAT, 0, &uvs[0]);
+
+  }
+  glDrawElements(GL_LINES, inds.size(), GL_UNSIGNED_INT, (void*)inds[0]);
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glDisableClientState(GL_NORMAL_ARRAY);
+  glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 }
