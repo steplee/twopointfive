@@ -1,7 +1,10 @@
 #include "mc.h"
+#include "octree.h"
+
 #include <stack>
 #include <iostream>
-#include <unordered_set>
+#include <unordered_map>
+#include <Eigen/Dense>
 
 
 // http://paulbourke.net/geometry/polygonise/
@@ -30,21 +33,7 @@ Vector3 VertexInterp(scalar isolevel, Vector3 p1,Vector3 p2, scalar valp1, scala
   return p;
 }
 
-/*
-   Given a grid cell and an isolevel, calculate the triangular
-   facets required to represent the isosurface through the cell.
-   Return the number of triangular facets, the array "triangles"
-   will be loaded up with the vertices at most 5 triangular facets.
-   0 will be returned if the grid cell is either totally above
-   of totally below the isolevel.
-   */
-int Polygonise(Gridcell grid, scalar isolevel, Triangle *triangles)
-{
-  int i,ntriang;
-  int cubeindex;
-  Vector3 vertlist[12];
-
-  int edgeTable[256]={
+  static const int edgeTable[256]={
     0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
     0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
     0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
@@ -77,7 +66,7 @@ int Polygonise(Gridcell grid, scalar isolevel, Triangle *triangles)
     0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
     0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
     0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0   };
-  int triTable[256][16] =
+  static const int triTable[256][16] =
   {{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
     {0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
     {0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
@@ -335,6 +324,19 @@ int Polygonise(Gridcell grid, scalar isolevel, Triangle *triangles)
     {0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
     {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}};
 
+/*
+   Given a grid cell and an isolevel, calculate the triangular
+   facets required to represent the isosurface through the cell.
+   Return the number of triangular facets, the array "triangles"
+   will be loaded up with the vertices at most 5 triangular facets.
+   0 will be returned if the grid cell is either totally above
+   of totally below the isolevel.
+   */
+int Polygonise(Gridcell grid, scalar isolevel, Vector3 vertlist[12], int& usedVertMask, int tris[5][3] )
+{
+  int i,ntriang;
+  int cubeindex;
+
   /*
      Determine the index into the edge table which
      tells us which vertices are inside of the surface
@@ -393,10 +395,18 @@ int Polygonise(Gridcell grid, scalar isolevel, Triangle *triangles)
 
   /* Create the triangle */
   ntriang = 0;
+  usedVertMask = 0;
   for (i=0;triTable[cubeindex][i]!=-1;i+=3) {
-    triangles[ntriang].row(0) = vertlist[triTable[cubeindex][i  ]];
-    triangles[ntriang].row(1) = vertlist[triTable[cubeindex][i+1]];
-    triangles[ntriang].row(2) = vertlist[triTable[cubeindex][i+2]];
+    int a = triTable[cubeindex][i  ],
+        b = triTable[cubeindex][i+1],
+        c = triTable[cubeindex][i+2];
+    //triangles[ntriang].row(0) = vertlist[a];
+    //triangles[ntriang].row(1) = vertlist[b];
+    //triangles[ntriang].row(2) = vertlist[c];
+    usedVertMask |= (1<<a) | (1<<b) | (1<<c);
+    tris[ntriang][0] = a;
+    tris[ntriang][1] = b;
+    tris[ntriang][2] = c;
     ntriang++;
   }
 
@@ -405,226 +415,16 @@ int Polygonise(Gridcell grid, scalar isolevel, Triangle *triangles)
 
 
 
-Octree::Octree(const Vector3& offset, const Vector4i& loc, scalar size, int depth, int maxDepth)
-  : offset(offset), size(size), depth(depth), maxDepth(maxDepth), loc(loc)
-{
-  cellId = -1;
-  cellVal = 0;
-  for (int i=0; i<8; i++)
-    children[i] = nullptr;
+// Note: has limited range
+inline uint64_t HASH_XYZ(float x, float y, float z) {
+  uint64_t a = (x+.5) * 1048576.;
+  uint64_t b = (y+.5) * 1048576.;
+  uint64_t c = (z+.5) * 1048576.;
+  return (a<<40) | (b<<20) | c;
 }
-
-Octree::Octree(const Octree& o) {
-  for (int i=0; i<8; i++) {
-    cellId = o.cellId;
-    cellVal = o.cellVal;
-    children[i] = o.children[i];
-  }
-}
-
-Octree::~Octree() {
-  //std::cout << " - destructor -- must free: " << mustFree << "\n";
-  if (mustFree) {
-    for (int i=0; i<8; i++) {
-      if (children[i]) {
-        delete children[i];
-        children[i] = nullptr;
-      }
-  }
-}
-}
-
-void Octree::add(const Vector3& pt, int id, scalar val) {
-  // If cellId is -2, that means we cannot the node has children and we cannot just store a record in the node.
-  // If cellId is -1, the node has never been touched and is allowed to store the record in itself.
-  // If we add() to a node with >=0 cellId, we must create children, add new record, set cellId=-2, then add old stored record.
-  //if (cellId == -1) {
-  if (depth == maxDepth) {
-    cellPt = pt; cellId = id; cellVal = val;
-  } else {
-    uint8_t l = 0;
-    if (pt(0) > offset(0)+size/2.) l |= 1;
-    if (pt(1) > offset(1)+size/2.) l |= 2;
-    if (pt(2) > offset(2)+size/2.) l |= 4;
-
-    if (pt(0) > offset(0)+size) return;
-    if (pt(1) > offset(1)+size) return;
-    if (pt(2) > offset(2)+size) return;
-
-    if (depth == maxDepth) {
-      cellPt = pt;
-      cellId = id;
-      cellVal = val;
-      return;
-    }
-
-    if (children[l] == nullptr) {
-      Vector3 new_off = Vector3::Zero();
-      Vector4i newloc { loc(0)*2, loc(1)*2, loc(2)*2, loc(3)+1 };
-      if (l & 1) { new_off(0) += size/2.0; newloc(0) += 1; }
-      if (l & 2) { new_off(1) += size/2.0; newloc(1) += 1; }
-      if (l & 4) { new_off(2) += size/2.0; newloc(2) += 1; }
-      children[l] = new Octree(offset + new_off, newloc, size/2.0, depth+1, maxDepth);
-    }
-    children[l]->add(pt, id, val);
-
-    // If cellId != -2, we must split, than insert old point.
-    if (cellId != -2) {
-      Vector3 pt__ = cellPt;
-      int id__ = cellId;
-      scalar val__ = cellVal;
-      cellPt.setZero(); cellId = -2; cellVal = 0;
-      this->add(pt__, id__, val__);
-    }
-  }
-
-}
-
-Gridcell Octree::gridcell() {
-  Gridcell out;
-
-  scalar o = static_cast<scalar>(size/1.0);
-  out.p[0] = offset + Vector3 { 0 , 0 , 0 };
-  out.p[1] = offset + Vector3 { o , 0 , 0 };
-  out.p[2] = offset + Vector3 { o , o , 0 };
-  out.p[3] = offset + Vector3 { 0 , o , 0 };
-
-  out.p[4] = offset + Vector3 { 0 , 0 , o };
-  out.p[5] = offset + Vector3 { o , 0 , o };
-  out.p[6] = offset + Vector3 { o , o , o };
-  out.p[7] = offset + Vector3 { 0 , o , o };
-  for (int i=0; i<8; i++) out.val[i] = cellVal;
-
-
-  /*
-  scalar o = static_cast<scalar>(size/1.0);
-  out.p[0] = offset + Vector3 { 0 , 0 , 0 };
-  out.p[1] = offset + Vector3 { o , 0 , 0 };
-  out.p[2] = offset + Vector3 { o , o , 0 };
-  out.p[3] = offset + Vector3 { 0 , o , 0 };
-
-  out.p[4] = offset + Vector3 { 0 , 0 , o };
-  out.p[5] = offset + Vector3 { o , 0 , o };
-  out.p[6] = offset + Vector3 { o , o , o };
-  out.p[7] = offset + Vector3 { 0 , o , o };
-
-  //for (int i=0;i<8;i++) std::swap(out.p[i](1), out.p[i](2));
-  //for (int i=0;i<8;i++) out.p[i](2) *= -1;
-  //for (int i=0;i<8;i++) out.p[i](2) *= -1;
-
-
-  //for (int i=0; i<8; i++) out.val[i] = cells[i](3);
-  for (int i=0; i<8; i++) out.val[i] = cellVals[i];
-  */
-
-  return out;
-}
-
-std::string Octree::info() {
-  int nc = 0;
-  for (int i=0; i<8; i++) if (children[i]) nc++;
-  std::string out = " - Node at ("
-    + std::to_string(offset(0)) + " "
-    + std::to_string(offset(1)) + " "
-    + std::to_string(offset(2))
-    + ", depth=" + std::to_string(depth) + ")"
-    + " with " + std::to_string(nc) + " children";
-  std::cout << "    - cell id/val: " << cellId << " " << cellVal << "\n";
-  return out;
-}
-
-void Octree::print(int depth) {
-  for (int i=0; i<depth; i++) std::cout << "  ";
-  std::cout << " node (" << loc.transpose() << ") with id " << cellId << " val " << cellVal << "\n";
-  for (int i=0; i<8; i++) {
-    if (children[i]) children[i]->print(depth+1);
-  }
-}
-
-
-DistIndexPairs Octree::search(const RowMatrixRef allPts, const RowMatrixRef qpts, int k) {
-  DistIndexPairs out;
-  int n = qpts.rows();
-  out.dists.resize(n,k);
-  out.indices.resize(n,k);
-
-  for (int ii=0; ii<n; ii++) {
-    std::stack<Octree*> path;
-    Octree* cur = this;
-    Vector3 pt = qpts.row(ii);
-
-    while (cur and cur->depth != cur->maxDepth) {
-      path.push(cur);
-      int l = 0;
-      if (pt(0) > cur->offset(0)+cur->size/2.) l |= 1;
-      if (pt(1) > cur->offset(1)+cur->size/2.) l |= 2;
-      if (pt(2) > cur->offset(2)+cur->size/2.) l |= 4;
-      cur = cur->children[l];
-    }
-
-    struct DistIndexScalar { float d; int i; };
-    std::vector<DistIndexScalar> pool;
-
-    // One stop criterion is if we aggregate at least K neighbors, then
-    // we should not look more than X more levels up.
-    // is X 1 or 2?
-    int8_t timesSeenAtleastK = 0, extraLevels = 1;
-
-    Octree* last = nullptr;
-    while ( (not path.empty()) and (timesSeenAtleastK <= extraLevels)) {
-      cur = path.top();
-      path.pop();
-      bool didAdd = false;
-
-      // DFS from this node, excepting 'last' visited node;
-      for (int i=0; i<8; i++) {
-        if (cur->children[i] and cur->children[i] != last) {
-          std::stack<Octree*> st; st.push(cur->children[i]);
-          while (not st.empty()) {
-            auto node = st.top(); st.pop();
-            if (node->depth == node->maxDepth) {
-              if (node->cellId != -1) {
-                Vector3 cell_pt = allPts.row(node->cellId);
-                pool.push_back( DistIndexScalar{(cell_pt-pt).squaredNorm(), node->cellId} );
-                didAdd = true;
-              }
-            } else for (int j=0; j<8; j++) if (node->children[j]) st.push(node->children[j]);
-          }
-        }
-      }
-      last = cur;
-
-      if (didAdd) {
-        std::sort(pool.begin(), pool.end(), [&pt](const DistIndexScalar &a, const DistIndexScalar &b) { return a.d < b.d; });
-        if (pool.size() > k) {
-          pool.resize(k);
-        }
-      }
-      if (pool.size() >= k) timesSeenAtleastK++;
-    }
-
-    //std::cout << " - Got Pool of size " << pool.size() << ":\n";
-    //for (int i=0; i<pool.size(); i++) { std::cout << "(" << pool[i].d << " " << pool[i].i << ") "; }
-
-    int size = pool.size() < k ? pool.size() : k;
-    for (int kk=0; kk<size; kk++) {
-      out.dists(ii,kk) = pool[kk].d;
-      out.indices(ii,kk) = pool[kk].i;
-    }
-    for (int kk=size; kk<k; kk++) {
-      out.dists(ii,kk) = 9e12;
-      out.indices(ii,kk) = -1;
-    }
-  }
-
-  //if (out.size() > k) out.resize(k);
-  return out;
-}
-
-//std::vector<Triangle> meshOctree(Octree& oct, scalar isolevel) { }
-
-std::vector<Triangle> meshOctree(Octree& oct, scalar isolevel) {
-  std::vector<Triangle> out;
+IndexedMesh meshOctree(Octree& oct, scalar isolevel) {
+  IndexedMesh out;
+  out.verts.resize(4096,3);
 
   // Traverse octree, for now data is only stored at maxDepth, so visit them and get tris.
   std::stack<Octree*> st;
@@ -634,11 +434,13 @@ std::vector<Triangle> meshOctree(Octree& oct, scalar isolevel) {
   int nleaves_ = 0, ntris_ = 0;
   int nbad=0, ngood=0;
 
+  std::unordered_map<uint64_t, int> vertMap;
+
   while (not st.empty()) {
     Octree* node = st.top();
     st.pop();
 
-    if (node->depth == node->maxDepth) {
+    if (node->depth() == node->maxDepth) {
       Triangle tmpTris[5];
 
       //if (node->loc(2) % 2 == 1) continue;
@@ -647,17 +449,10 @@ std::vector<Triangle> meshOctree(Octree& oct, scalar isolevel) {
 
       //Gridcell gc = node->gridcell();
       Gridcell gc;
-      //gc.p[0] = node->offset.array() + ((float)node->size/2.);
-      //gc.p[0] = node->offset;
-      //gc.val[0] = node->cellVal;
       bool bad = false;
       for (int i=0; i<2; i++)
       for (int j=0; j<2; j++)
       for (int k=0; k<2; k++) {
-        //if (i == 0 and j == 0 and k == 0) continue;
-        //Vector4i the_loc = node->loc - Vector4i{i,j,k,0};
-        //if (the_loc(0)<0 or the_loc(1)<0 or the_loc(2)<0) { bad = true; continue; }
-        //if (i == 0 and j == 0 and k == 0) continue;
         Vector4i the_loc = node->loc + Vector4i{i,j,k,0};
 
         int lll = 0;
@@ -668,23 +463,58 @@ std::vector<Triangle> meshOctree(Octree& oct, scalar isolevel) {
         int ll = (k<<2) + lll;
 
         Octree* sib = oct.searchNode(the_loc);
+        auto sz = node->size();
         if (sib->loc == the_loc) {
           gc.val[ll] = sib->cellVal;
-          gc.p[ll] = sib->offset.array() + node->size/2.;
+          gc.p[ll] = sib->offset().array() + sz/2.;
         } else {
           gc.val[ll] = 0;
-          gc.p[ll] = node->offset + Vector3 { i*node->size , j*node->size , k*node->size };
+          gc.p[ll] = node->offset() + Vector3 { i*sz , j*sz , k*sz };
         }
       }
 
 
       if (not bad) {
-        int ntris = Polygonise(gc, isolevel, tmpTris);
+        // My version of Polygonise will expose all 12 possible verts, the indices of up-to five tris, and a vertMask.
+        // For any of the five tris, the three vertices corresponding to the indices will be marked in vertMask.
+        // This is so we can create 0-12 new vertices for this cell and add them to the mesh.
+        // Here, I use a hashmap to prevent adding new vertices from previous cells, and instead just linking the
+        // old index in the new tri.
+        // The best approach would be numbering each edge in a consistent manner, but this works okay too.
+        // One downside of hashing is that unordered_map doesn't support __int128, so I use uint64 instead, and the float
+        // resolution is not great (supports up to 2^20).
+        Vector3 verts[12];
+        int vertMask = 0;
+        int tris[5][3];
+        int ntris = Polygonise(gc, isolevel, verts, vertMask, tris);
+
         ntris_ += ntris;
         nleaves_ += 1;
         ngood++;
+
+        int actualVerts[12] = { 0 };
+
+        for (int i=0; i<12; i++)
+          if (vertMask & (1<<i)) {
+            uint64_t hashedEdge = HASH_XYZ(verts[i](0), verts[i](1), verts[i](2));
+            if (vertMap.find(hashedEdge) == vertMap.end()) {
+              //out.verts.push_back(verts[i]);
+              if (out.vertCntr >= out.verts.rows()) {
+                out.verts.conservativeResize(out.verts.rows()*2, Eigen::NoChange);
+              }
+              out.verts.row(out.vertCntr) = verts[i];
+              out.vertCntr++;
+              actualVerts[i] = out.vertCntr-1;
+              vertMap[hashedEdge] = out.vertCntr-1;
+            } else {
+              actualVerts[i] = vertMap[hashedEdge];
+            }
+          }
         for (int i=0; i<ntris; i++) {
-          out.push_back(tmpTris[i]);
+          out.inds.push_back(actualVerts[tris[i][0]]);
+          out.inds.push_back(actualVerts[tris[i][1]]);
+          out.inds.push_back(actualVerts[tris[i][2]]);
+          //out.push_back(tmpTris[i]);
         }
       } else {
         nbad++;
@@ -700,6 +530,7 @@ std::vector<Triangle> meshOctree(Octree& oct, scalar isolevel) {
 
   std::cout << " - " << ntris_ << " tris from " << nleaves_ << " leaves (nbad/ntotal " << nbad << "/" << (ngood+nbad) << ")\n";
 
+  out.verts.conservativeResize(out.vertCntr, Eigen::NoChange);
   return out;
 }
 
@@ -720,7 +551,7 @@ IndexedMesh meshOctreeSurfaceNet(Octree& oct, scalar iso) {
     Octree* node = st.top();
     st.pop();
 
-    if (node->depth == node->maxDepth) {
+    if (node->depth() == node->maxDepth) {
       Triangle tmpTris[5];
       Gridcell gc;
       bool bad = false;
@@ -733,7 +564,7 @@ IndexedMesh meshOctreeSurfaceNet(Octree& oct, scalar iso) {
         if (sib->loc == the_loc) {
           int ll = (k<<2) + (j<<1) + i;
           gc.val[ll] = sib->cellVal;
-          gc.p[ll] = sib->offset;
+          gc.p[ll] = sib->offset();
         } else bad = true;
       }
 
@@ -773,9 +604,10 @@ IndexedMesh meshOctreeSurfaceNet(Octree& oct, scalar iso) {
           }
         }
 
-        vert = node->offset + vert * (node->size / e_count);
+        vert = node->offset() + vert * (node->size() / e_count);
 
-        out.verts.push_back(vert);
+        //out.verts.push_back(vert);
+        out.verts.row(out.vertCntr++) = vert;
         // TODO record index.
 
         for (int i=0; i<3; i++) {
@@ -813,103 +645,167 @@ IndexedMesh meshOctreeSurfaceNet(Octree& oct, scalar iso) {
 
 
 
-#include <GL/glew.h>
-void Octree::render(int toDepth) {
-  //glBegin(GL_LINES);
-  glEnableClientState(GL_VERTEX_ARRAY);
-  render_(toDepth);
-  glDisableClientState(GL_VERTEX_ARRAY);
-  //glEnd();
-}
-
-void Octree::render_(int toDepth) {
-  if (toDepth == 0) return;
-
-  float alpha = ((float)depth+1)/((float)maxDepth+4);
-  //alpha = depth < maxDepth ? 0 : alpha;
-  glColor4f(0,0,1,alpha);
-
-  auto gc = gridcell();
-  static const int inds[] = { 0,1, 1,2, 2,3, 3,0, 0,4, 1,5, 2,6, 3,7,  4,5, 5,6, 6,7, 7,4};
-  /*
-  for (int i=0; i<24; i++)
-    glVertex3f(gc.p[inds[i]](0), gc.p[inds[i]](1), gc.p[inds[i]](2));
-  */
-    glVertexPointer(3, GL_FLOAT, 0, &gc.p[0]);
-    glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, (void*)inds);
-
-  for (int j=0; j<8; j++)
-    if (this->children[j] != nullptr) {
-      this->children[j]->render_(toDepth-1);
-    }
-
-}
-
-Octree Octree::child(int i) {
-  Octree node (*children[i]);
-  node.mustFree = false;
-  return node;
-}
-Octree* Octree::searchNode(const Vector3& pt) {
-  Octree* cur = this;
-
-  while (cur and cur->depth != cur->maxDepth) {
-    int l = 0;
-    if (pt(0) > cur->offset(0)+cur->size/2.) l |= 1;
-    if (pt(1) > cur->offset(1)+cur->size/2.) l |= 2;
-    if (pt(2) > cur->offset(2)+cur->size/2.) l |= 4;
-    cur = cur->children[l];
-  }
-  return cur;
-}
-
-Octree* Octree::searchNode(const Vector4i& loc_) {
-  Octree* cur = this;
-  int qx=loc_(0), qy=loc_(1), qz=loc_(2), qd=loc_(3);
-
-  //std::cout << " searching for " << loc_.transpose() << "\n";
-
-  while (true) {
-    int l = 0;
-    int x=cur->loc(0), y=cur->loc(1), z=cur->loc(2), dd=cur->loc(3);
-
-    int d = qd - dd - 1;
-
-    if (qx & (1<<d)) l |= 1;
-    if (qy & (1<<d)) l |= 2;
-    if (qz & (1<<d)) l |= 4;
-
-    //std::cout << "   at " << cur->loc.transpose() << " going " << ((l)&1) << " " << ((l>>1)&1) << " " << ((l>>2)&1) << " : " << l << "\n";
-
-    if (cur->children[l])
-      cur = cur->children[l];
-    else {
-      //std::cout << "   end at " << cur->loc.transpose() << "\n";
-      return cur;
-    }
-  }
-}
 
 void IndexedMesh::print() {
-  std::cout << " - Mesh (" << verts.size() << " verts) (" << inds.size() << " inds)" << "\n";
+  std::cout << " - Mesh:\n\tverts: " << verts.rows() << "\n\tinds: " << inds.size();
+  std::cout << "\n\tvertexNormals: " << vertexNormals.rows();
+  std::cout << "\n\tfaceNormals: " << faceNormals.rows();
+  std::cout << "\n\tuvs: " << uvs.rows() << " x " << uvs.cols();
+  std::cout << "\n\ttex: " << tex;
+  std::cout << "\n";
 }
+
 void IndexedMesh::render() {
   glEnableClientState(GL_VERTEX_ARRAY);
-  glVertexPointer(3, GL_FLOAT, 0, &verts[0]);
-  if (normals.size()) {
-    assert(normals.size() == verts.size());
-    glEnableClientState(GL_NORMAL_ARRAY);
-    glNormalPointer(GL_FLOAT, 0, &normals[0]);
-  }
-  if (uvs.size()) {
-    assert(uvs.size() == verts.size());
-    glClientActiveTexture(GL_TEXTURE0);
-    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-    glTexCoordPointer(2, GL_FLOAT, 0, &uvs[0]);
+  glVertexPointer(3, GL_FLOAT, 0, verts.data());
 
+  if (vertexNormals.size()) {
+    assert(vertexNormals.size() == verts.size());
+    glEnableClientState(GL_NORMAL_ARRAY);
+    glNormalPointer(GL_FLOAT, 0, vertexNormals.data());
   }
-  glDrawElements(GL_LINES, inds.size(), GL_UNSIGNED_INT, (void*)inds[0]);
+
+  if (uvs.size() and tex != 0) {
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    //glClientActiveTexture(GL_TEXTURE0);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glTexCoordPointer(2, GL_FLOAT, 0, (void*)uvs.data());
+    glColor4f(1,1,1,1.);
+  }
+
+  glDrawElements(mode, inds.size(), GL_UNSIGNED_INT, (void*)inds.data());
+
   glDisableClientState(GL_VERTEX_ARRAY);
   glDisableClientState(GL_NORMAL_ARRAY);
   glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  glDisable(GL_TEXTURE_2D);
+}
+
+IndexedMesh convertTriangleMeshToLines(const IndexedMesh& in) {
+  IndexedMesh out;
+  out.verts = in.verts;
+  out.inds.reserve(in.inds.size()*2);
+  for (int i=0; i<in.inds.size(); i+=3) {
+    int a = in.inds[i], b = in.inds[i+1], c = in.inds[i+2];
+    out.inds.push_back(a);
+    out.inds.push_back(b);
+    out.inds.push_back(a);
+    out.inds.push_back(c);
+    out.inds.push_back(b);
+    out.inds.push_back(c);
+  }
+  out.mode = GL_LINES;
+  return out;
+}
+
+
+IndexedMesh normalsToMesh(const RowMatrixCRef verts, const RowMatrixCRef normals, float size) {
+  IndexedMesh out;
+  out.verts.resize(verts.rows()*2, 3);
+  for (int i=0; i<verts.rows(); i++) {
+    Vector3 a = verts.row(i);
+    Vector3 b = verts.row(i) + normals.row(i) * size;
+    out.verts.row(i*2  ) = a;
+    out.verts.row(i*2+1) = b;
+    out.inds.push_back(2*i  );
+    out.inds.push_back(2*i+1);
+  }
+  out.mode = GL_LINES;
+  return out;
+}
+void computeVertexNormals(Octree& tree, IndexedMesh& mesh) {
+  auto N = mesh.verts.rows();
+  auto M = mesh.inds.size();
+
+  mesh.vertexNormals.resize(N, 3);
+  mesh.vertexNormals.setZero();
+
+  //Eigen::Matrix<int, -1, 1> cntsPerVertex(N);
+  //cntsPerVertex.setZero();
+
+  // For every vertex, find nearest cells' pts and compute normals.
+  // Note: we actually do not run on the input point set, but the grid it creates.
+  for (int i=0; i<M; i+=3) {
+    int u = mesh.inds[i], v = mesh.inds[i+1], w = mesh.inds[i+2];
+    Vector3 a = mesh.verts.row(u);
+    Vector3 b = mesh.verts.row(v);
+    Vector3 c = mesh.verts.row(w);
+    Vector3 n = (b-a).eval().cross((c-a).eval());
+    mesh.vertexNormals.row(u) += n;
+    mesh.vertexNormals.row(v) += n;
+    mesh.vertexNormals.row(w) += n;
+    //cntsPerVertex(u) += 1;
+    //cntsPerVertex(v) += 1;
+    //cntsPerVertex(w) += 1;
+  }
+
+  for (int i=0; i<N; i++) {
+    //mesh.vertexNormals.row(i) = mesh.vertexNormals.row(i).array() / cntsPerVertex(i);
+    mesh.vertexNormals.row(i) = mesh.vertexNormals.row(i).normalized();
+  }
+}
+
+#include <Eigen/SVD>
+
+RowMatrix computePointSetNormals(const Octree& tree, RowMatrixCRef treePts, RowMatrixCRef qpts) {
+  int QN = qpts.rows();
+  RowMatrix out;
+  out.resize(QN, 3);
+
+  std::cout << " - computePointSetNormals:\n";
+  std::cout << "     - searching...";
+  std::cout.flush();
+  auto res = tree.search(qpts, 6);
+  std::cout << " ...done" << std::endl;
+
+
+  std::cout << "     - SVDs...";
+  std::cout.flush();
+
+  #pragma omp parallel for schedule(static)
+  for (int i=0; i<QN; i++) {
+    Vector3 qpt = qpts.row(i);
+    Eigen::VectorXf dists = res.dists.row(i);
+    Eigen::VectorXi inds = res.indices.row(i).head<4>(); // note: only use closest 4.
+    RowMatrix nns(inds.size(), 3);
+    //for (int j=0; j<inds.size(); j++) nns.row(j) = treePts.row(inds(j)) - qpt.transpose();
+    for (int j=0; j<inds.size(); j++) nns.row(j) = treePts.row(inds(j));
+    nns.rowwise() -= nns.colwise().mean();
+
+    //std::cout << "      pt " << i << " / " << QN << " nns " << inds.transpose() << "\n";
+    //std::cout << "      pt " << i << " / " << QN << " nns " << nns.colwise().mean() << "\n";
+
+    Eigen::JacobiSVD<RowMatrix> svd(nns, Eigen::ComputeFullV);
+    Vector3 normal = svd.matrixV().col(2);
+    out.row(i) = normal;
+  }
+  std::cout << " ...done" << std::endl;
+  return out;
+}
+
+RowMatrix getNegativePoints(
+    const Octree& tree,
+    RowMatrixCRef treePts,
+    RowMatrixCRef treePtNormals,
+    float normalLength) {
+
+  RowMatrix tmp(treePts.rows()*2, 3);
+
+  for (int i=0; i<tmp.rows(); i+=2) tmp.row(i) = treePts.row(i/2) +  treePtNormals.row(i/2) * normalLength;
+  for (int i=1; i<tmp.rows(); i+=2) tmp.row(i) = treePts.row(i/2) + -treePtNormals.row(i/2) * normalLength;
+
+  // Erase bad points.
+  std::vector<int> good;
+  auto res = tree.search(tmp, 2);
+  for (int i=0; i<tmp.rows(); i++) {
+    if (res.indices(i,0) == i/2) good.push_back(i);
+    //std::cout << " search: " << tmp.row(i) << " got " << treePts.row(res.indices(i,0)) << " d " << res.dists(i,0) << "\n";
+  }
+
+
+  RowMatrix out(good.size(), 3);
+  for (int i=0; i<good.size(); i++) out.row(i) = tmp.row(good[i]);
+  return out;
 }

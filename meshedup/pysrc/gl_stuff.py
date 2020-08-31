@@ -142,6 +142,7 @@ class OctreeApp(SingletonApp):
         self.phi = np.pi/4
         self.lam = np.pi/4
         self.rad = 4
+        self.center = np.array((.5,.5,0), dtype=np.float32)
     def render(self):
         glClearColor(0.0, 0.0, 0.0, 0.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -162,10 +163,11 @@ class OctreeApp(SingletonApp):
             x = np.sin(self.lam) * np.cos(self.phi) * self.rad
             y = np.sin(self.lam) * np.sin(self.phi) * self.rad
             z = np.cos(self.lam) * self.rad
-            gluLookAt(x,y,z, 0,0,0, 0,0,1)
+            x,y,z = (x,y,z)+self.center
+            gluLookAt(x,y,z, *self.center, 0,0,1)
             self.left_dx=self.left_dy=self.right_dy=0
 
-        near = .1
+        near = .02
         u = np.tan(np.deg2rad(35)) * near
         v = np.tan(np.deg2rad(35)) * near
         #m = frustum_z_forward(-u,u,-v,v,1,50)
